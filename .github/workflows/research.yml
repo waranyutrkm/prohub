@@ -26,6 +26,7 @@ jobs:
       - run: pip install -r requirements.txt 'vectorbt>=0.28,<1' 'plotly==5.24.1'
       - run: python -c "import vectorbt, plotly; print(vectorbt.__version__, plotly.__version__)"
       - run: python -m unittest -v
+      - run: python -m unittest research.test_dynamic -v
       - run: python -m research.backtest
       - uses: actions/upload-artifact@v4
         with:

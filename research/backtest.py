@@ -14,6 +14,9 @@ PROXIES=[os.environ.get('US_PROXY','SPY'),'ACWI','THD','BTC-USD','IEF','UUP','DB
 CASH='BIL'
 BENCH=['SPY','QQQ','ACWI']
 STRATEGIES=['rank','top1','top3','top50','trend','momentum','leading','recovering','positive_momentum','acceleration','dual','inverse_vol','price','hybrid']
+DYNAMIC=['mom_above_mean','mom_above_zero','mom_above_mean_positive','mom_above_10','mom_above_median','mom_positive_rank','mom_positive_score','mom_mean_rank','mom_positive_cash_slots','trend_above_mean','trend_above_zero','composite_above_mean','composite_above_zero']
+STRATEGIES+=DYNAMIC
+
 def metrics(v):
     r=v.pct_change().dropna()
     years=(v.index[-1]-v.index[0]).days/365.25
@@ -29,17 +32,29 @@ def targets(strategy,t,m,c,p,vol,rb,top=3):
     if strategy=='recovering':score=m.where((t< -10)&(m>10))
     if strategy=='positive_momentum':score=m.where(m>10)
     if strategy=='dual':score=score.where(score>0)
-    n={'top1':1,'top50':4,'rank':8}.get(strategy,top)
+    dynamic=strategy in DYNAMIC
+    if dynamic:
+        score=t.copy() if strategy.startswith('trend_') else c.copy() if strategy.startswith('composite_') else m.copy()
+        if strategy in ['mom_above_mean','mom_above_mean_positive','mom_mean_rank','trend_above_mean','composite_above_mean']:
+            score=score.where(score.gt(score.mean(axis=1),axis=0))
+        if strategy in ['mom_above_zero','mom_above_mean_positive','mom_positive_rank','mom_positive_score','mom_positive_cash_slots','trend_above_zero','composite_above_zero']:
+            score=score.where(score>0)
+        if strategy=='mom_above_10':score=score.where(score>10)
+        if strategy=='mom_above_median':score=score.where(score.gt(score.median(axis=1),axis=0))
+    n=8 if dynamic else {'top1':1,'top50':4,'rank':8}.get(strategy,top)
     weights=pd.DataFrame(np.nan,index=score.index,columns=PROXIES+[CASH])
     for i in range(0,len(score),rb):
         s=score.iloc[i].dropna().sort_values(ascending=False,kind='stable').head(n)
         w=pd.Series(0.,index=weights.columns)
         if len(s):
-            if strategy=='rank':a=pd.Series(np.arange(len(s),0,-1),index=s.index,dtype=float)
+            if strategy in ['rank','mom_positive_rank','mom_mean_rank']:a=pd.Series(np.arange(len(s),0,-1),index=s.index,dtype=float)
+            elif strategy=='mom_positive_score':a=s.astype(float)
             elif strategy=='inverse_vol':a=1/vol.iloc[i].reindex(s.index).replace(0,np.nan)
             else:a=pd.Series(1.,index=s.index)
             a=a.replace([np.inf,-np.inf],np.nan).dropna()
-            if a.sum()>0:w.loc[a.index]=a/a.sum()*min(1,len(a)/n)*.995
+            if a.sum()>0:
+                exposure=1 if dynamic and strategy!='mom_positive_cash_slots' else min(1,len(a)/n)
+                w.loc[a.index]=a/a.sum()*exposure*.995
         w[CASH]=.995-w.sum()
         weights.iloc[i]=w
     return weights
@@ -105,7 +120,7 @@ def main():
     rows=[]
     rotation=None
     for strategy in STRATEGIES:
-        for rb in [5,20,60]:
+        for rb in ([5,10,15,20,25,30,40,60] if strategy in DYNAMIC or strategy=='momentum' else [5,20,60]):
             w=targets(strategy,t,m,c,p,vol,rb)
             for cost in [.0005,.001,.002]:
                 if strategy=='momentum' and rb==20 and cost==.001:
@@ -114,7 +129,8 @@ def main():
                     rotation=rotation_details(pf,prices[PROXIES+[CASH]],w,m,prices)
                 else:
                     v=portfolio(prices[PROXIES+[CASH]],w,cost)
-                rows.append(dict(strategy=strategy,rebalance=rb,cost=cost,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
+                picks=(w[PROXIES].fillna(0)>0).sum(axis=1).loc[w.notna().any(axis=1)]
+                rows.append(dict(strategy=strategy,rebalance=rb,cost=cost,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:]),avg_selected=round(float(picks.mean()),3),zero_selected_pct=round(float((picks==0).mean()*100),3)))
     for b in BENCH:
         v=prices[b]/prices[b].iloc[0]*100000
         rows.append(dict(strategy=b,rebalance=None,cost=0,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
