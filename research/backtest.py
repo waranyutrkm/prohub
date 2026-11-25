@@ -50,11 +50,18 @@ def rotation_details(pf,px,w,m,bench):
     import datetime
     dates=px.index.strftime('%Y-%m-%d').tolist()
     equity=pf.value()
-    shares=pf.assets()
-    assert isinstance(shares,pd.DataFrame) and list(shares.columns)==list(px.columns)
+    # Reconstruct individual holdings from actual executed order records, independent of grouping labels.
+    records=pf.orders.records
+    changes=np.zeros(px.shape,dtype=float)
+    cash_changes=np.zeros(len(px),dtype=float)
+    for o in records.itertuples(index=False):
+        sign=1 if int(o.side)==0 else -1
+        changes[int(o.idx),int(o.col)]+=sign*float(o.size)
+        cash_changes[int(o.idx)]-=sign*float(o.size)*float(o.price)+float(o.fees)
+    shares=pd.DataFrame(changes.cumsum(axis=0),index=px.index,columns=px.columns)
+    cash=pd.Series(100000+cash_changes.cumsum(),index=px.index)
+    if not np.allclose(shares.mul(px).sum(axis=1)+cash,equity,rtol=1e-8,atol=1e-5):raise RuntimeError('Order ledger does not reconcile to VectorBT equity')
     actual=shares.mul(px).div(equity,axis=0)
-    cash=pf.cash()
-    assert isinstance(cash,pd.Series)
     actual['Cash']=cash/equity
     if not np.allclose(actual.sum(axis=1),1,atol=1e-6):raise RuntimeError('Portfolio weights fail reconciliation')
     orders=[]
