@@ -1,5 +1,6 @@
 """Fixed-universe exploratory rotation; no orders at signal-day prices."""
 import json
+import os
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -9,7 +10,7 @@ from engine import breadth
 from refresh import download
 
 ROOT=Path(__file__).resolve().parents[1]
-PROXIES=['SPY','ACWI','THD','BTC-USD','IEF','UUP','DBA','GLD']
+PROXIES=[os.environ.get('US_PROXY','SPY'),'ACWI','THD','BTC-USD','IEF','UUP','DBA','GLD']
 CASH='BIL'
 BENCH=['SPY','QQQ','ACWI']
 STRATEGIES=['rank','top1','top3','top50','trend','momentum','leading','recovering','positive_momentum','acceleration','dual','inverse_vol','price','hybrid']
@@ -83,12 +84,13 @@ def main():
         rows.append(dict(strategy=b,rebalance=None,cost=0,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
     # Equal weight and 60/40 use same execution simulator.
     for label,alloc in [('equal',{k:.995/8 for k in PROXIES}),('60/40',{'SPY':.597,'IEF':.398})]:
-        w=pd.DataFrame(np.nan,index=prices.index,columns=PROXIES+[CASH])
+        bench_cols=list(dict.fromkeys(PROXIES+[CASH]+list(alloc)))
+        w=pd.DataFrame(np.nan,index=prices.index,columns=bench_cols)
         w.iloc[::20]=0.
         for k,a in alloc.items():w.loc[w.index[::20],k]=a
-        v=portfolio(prices[PROXIES+[CASH]],w,.001)
+        v=portfolio(prices[bench_cols],w,.001)
         rows.append(dict(strategy=label,rebalance=20,cost=.001,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
-    result=dict(start=str(prices.index[0].date()),end=str(prices.index[-1].date()),split=str(split.date()),sessions=len(prices),rows=rows,limitations='Fixed universe; exploratory split; adjusted close execution; prior calendar day breadth; US sessions; equal member breadth; inverse yield/FX heuristic; no tax or extra slippage.')
-    out=ROOT/'research_results.json';out.write_text(json.dumps(result,indent=2,allow_nan=False))
-    print('RESEARCH_RESULT',json.dumps(result,separators=(',',':'),allow_nan=False))
+    result=dict(us_proxy=PROXIES[0],start=str(prices.index[0].date()),end=str(prices.index[-1].date()),split=str(split.date()),sessions=len(prices),rows=rows,limitations='Fixed universe; exploratory split; adjusted close execution; prior calendar day breadth; US sessions; equal member breadth; inverse yield/FX heuristic; no tax or extra slippage.')
+    out=ROOT/('research_results_'+PROXIES[0]+'.json');out.write_text(json.dumps(result,indent=2,allow_nan=False))
+    print('RESEARCH_RESULT_'+PROXIES[0],json.dumps(result,separators=(',',':'),allow_nan=False))
 if __name__=='__main__':main()

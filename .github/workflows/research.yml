@@ -10,6 +10,12 @@ permissions:
   contents: read
 jobs:
   backtest:
+    strategy:
+      fail-fast: false
+      matrix:
+        us_proxy: [SPY, QQQ]
+    env:
+      US_PROXY: ${{ matrix.us_proxy }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -23,5 +29,5 @@ jobs:
       - run: python -m research.backtest
       - uses: actions/upload-artifact@v4
         with:
-          name: research-results-${{ github.run_id }}-${{ github.run_attempt }}
-          path: research_results.json
+          name: research-results-${{ matrix.us_proxy }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: research_results_${{ matrix.us_proxy }}.json
