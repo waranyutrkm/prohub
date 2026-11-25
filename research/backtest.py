@@ -1,0 +1,94 @@
+"""Fixed-universe exploratory rotation; no orders at signal-day prices."""
+import json
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import vectorbt as vbt
+import yfinance as yf
+from engine import breadth
+from refresh import download
+
+ROOT=Path(__file__).resolve().parents[1]
+PROXIES=['SPY','ACWI','THD','BTC-USD','IEF','UUP','DBA','GLD']
+CASH='BIL'
+BENCH=['SPY','QQQ','ACWI']
+STRATEGIES=['rank','top1','top3','top50','trend','momentum','leading','recovering','positive_momentum','acceleration','dual','inverse_vol','price','hybrid']
+def metrics(v):
+    r=v.pct_change().dropna()
+    years=(v.index[-1]-v.index[0]).days/365.25
+    return {'CAGR':round((v.iloc[-1]/v.iloc[0])**(1/years)-1,6),'Sharpe':round(float(r.mean()/r.std()*np.sqrt(252)),4) if r.std()>0 else None,'MaxDD':round(float((v/v.cummax()-1).min()),6),'Total':round(float(v.iloc[-1]/v.iloc[0]-1),6)}
+def targets(strategy,t,m,c,p,vol,rb,top=3):
+    score=c.copy()
+    if strategy=='trend':score=t
+    if strategy=='momentum':score=m
+    if strategy=='acceleration':score=c.diff(20)
+    if strategy=='price':score=p
+    if strategy=='hybrid':score=c.rank(axis=1,pct=True)+p.rank(axis=1,pct=True)
+    if strategy=='leading':score=score.where((t>10)&(m>10))
+    if strategy=='recovering':score=m.where((t< -10)&(m>10))
+    if strategy=='positive_momentum':score=m.where(m>10)
+    if strategy=='dual':score=score.where(score>0)
+    n={'top1':1,'top50':4,'rank':8}.get(strategy,top)
+    weights=pd.DataFrame(np.nan,index=score.index,columns=PROXIES+[CASH])
+    for i in range(0,len(score),rb):
+        s=score.iloc[i].dropna().sort_values(ascending=False,kind='stable').head(n)
+        w=pd.Series(0.,index=weights.columns)
+        if len(s):
+            if strategy=='rank':a=pd.Series(np.arange(len(s),0,-1),index=s.index,dtype=float)
+            elif strategy=='inverse_vol':a=1/vol.iloc[i].reindex(s.index).replace(0,np.nan)
+            else:a=pd.Series(1.,index=s.index)
+            a=a.replace([np.inf,-np.inf],np.nan).dropna()
+            if a.sum()>0:w.loc[a.index]=a/a.sum()*min(1,len(a)/n)*.995
+        w[CASH]=.995-w.sum()
+        weights.iloc[i]=w
+    return weights
+def portfolio(prices,weights,cost):
+    pf=vbt.Portfolio.from_orders(prices,size=weights,size_type='targetpercent',cash_sharing=True,group_by=True,call_seq='auto',init_cash=100000,fees=cost,slippage=0.,freq='1D')
+    return pf.value()
+def main():
+    universe=json.loads((ROOT/'universe.json').read_text())
+    raw=download(list(dict.fromkeys(' '.join(universe.values()).split())))
+    raw=raw.reindex(pd.date_range(raw.index.min(),raw.index.max(),freq='D'))
+    groups=[breadth(raw,s.split()) for s in universe.values()]
+    def signal(k):
+        x=pd.concat([g[k] for g in groups],axis=1);x.columns=PROXIES
+        x[['IEF','UUP']]*=-1
+        return x
+    tickers=list(dict.fromkeys(PROXIES+[CASH]+BENCH))
+    prices=yf.download(tickers,start='2010-01-01',auto_adjust=True,progress=False,threads=False)['Close']
+    prices.index=pd.to_datetime(prices.index).tz_localize(None).normalize()
+    prices=prices.loc[prices.index<pd.Timestamp.now(tz='UTC').tz_localize(None).normalize()]
+    # Use common US trading sessions; BTC weekend performance included in next session return.
+    prices=prices.loc[prices.SPY.notna(),tickers].dropna()
+    # Signals from preceding calendar date, never execution close; additional session lag for price signals.
+    def align(x):return x.reindex(prices.index-pd.Timedelta(days=1)).set_axis(prices.index)
+    t,m,c=map(lambda k:align(signal(k)),['Trend','Momentum','Composite'])
+    p=prices[PROXIES].pct_change(120).shift(1)
+    vol=prices[PROXIES].pct_change().rolling(20).std().shift(1)
+    valid=t.notna().all(axis=1)&m.notna().all(axis=1)&p.notna().all(axis=1)
+    if not valid.any():raise RuntimeError('No complete signal history')
+    start=valid[valid].index[0]
+    prices=prices.loc[start:];t,m,c,p,vol=[x.loc[start:] for x in [t,m,c,p,vol]]
+    # Fixed chronological split, exploratory only (no claim of true independent OOS).
+    split=prices.index[int(len(prices)*.7)]
+    rows=[]
+    for strategy in STRATEGIES:
+        for rb in [5,20,60]:
+            w=targets(strategy,t,m,c,p,vol,rb)
+            for cost in [.0005,.001,.002]:
+                v=portfolio(prices[PROXIES+[CASH]],w,cost)
+                rows.append(dict(strategy=strategy,rebalance=rb,cost=cost,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
+    for b in BENCH:
+        v=prices[b]/prices[b].iloc[0]*100000
+        rows.append(dict(strategy=b,rebalance=None,cost=0,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
+    # Equal weight and 60/40 use same execution simulator.
+    for label,alloc in [('equal',{k:.995/8 for k in PROXIES}),('60/40',{'SPY':.597,'IEF':.398})]:
+        w=pd.DataFrame(np.nan,index=prices.index,columns=PROXIES+[CASH])
+        w.iloc[::20]=0.
+        for k,a in alloc.items():w.loc[w.index[::20],k]=a
+        v=portfolio(prices[PROXIES+[CASH]],w,.001)
+        rows.append(dict(strategy=label,rebalance=20,cost=.001,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
+    result=dict(start=str(prices.index[0].date()),end=str(prices.index[-1].date()),split=str(split.date()),sessions=len(prices),rows=rows,limitations='Fixed universe; exploratory split; adjusted close execution; prior calendar day breadth; US sessions; equal member breadth; inverse yield/FX heuristic; no tax or extra slippage.')
+    out=ROOT/'research_results.json';out.write_text(json.dumps(result,indent=2,allow_nan=False))
+    print('RESEARCH_RESULT',json.dumps(result,separators=(',',':'),allow_nan=False))
+if __name__=='__main__':main()

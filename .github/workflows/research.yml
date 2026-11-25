@@ -1,0 +1,26 @@
+name: ProHub VectorBT Research
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'research/**'
+      - '.github/workflows/research.yml'
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'vectorbt>=0.28,<1'
+      - run: python -m unittest -v
+      - run: python -m research.backtest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: research-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: research_results.json
