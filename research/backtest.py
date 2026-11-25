@@ -43,12 +43,35 @@ def targets(strategy,t,m,c,p,vol,rb,top=3):
         w[CASH]=.995-w.sum()
         weights.iloc[i]=w
     return weights
-def portfolio(prices,weights,cost):
+def portfolio(prices,weights,cost,details=False):
     pf=vbt.Portfolio.from_orders(prices,size=weights,size_type='targetpercent',cash_sharing=True,group_by=True,call_seq='auto',init_cash=100000,fees=cost,slippage=0.,freq='1D')
-    return pf.value()
+    return pf if details else pf.value()
+def rotation_details(pf,px,w,m,bench):
+    import datetime
+    dates=px.index.strftime('%Y-%m-%d').tolist()
+    equity=pf.value()
+    shares=pf.assets()
+    assert isinstance(shares,pd.DataFrame) and list(shares.columns)==list(px.columns)
+    actual=shares.mul(px).div(equity,axis=0)
+    cash=pf.cash()
+    assert isinstance(cash,pd.Series)
+    actual['Cash']=cash/equity
+    if not np.allclose(actual.sum(axis=1),1,atol=1e-6):raise RuntimeError('Portfolio weights fail reconciliation')
+    orders=[]
+    for o in pf.orders.records.itertuples(index=False):
+        orders.append(dict(date=dates[int(o.idx)],ticker=px.columns[int(o.col)],side='BUY' if int(o.side)==0 else 'SELL',quantity=float(o.size),price=float(o.price),fees=float(o.fees),notional=float(o.size*o.price)))
+    reb=[]
+    for i in range(len(w)):
+        if w.iloc[i].notna().any():
+            reb.append(dict(date=dates[i],signal_date=str((px.index[i]-pd.Timedelta(days=1)).date()),target={k:round(float(v),8) for k,v in w.iloc[i].items() if v>1e-10},scores={k:(round(float(v),4) if pd.notna(v) else None) for k,v in m.iloc[i].items()},actual={k:round(float(v),8) for k,v in actual.iloc[i].items() if v>1e-10}))
+    pos=[dict(ticker=k,quantity=float(shares[k].iloc[-1]),price=float(px[k].iloc[-1]),value=float(shares[k].iloc[-1]*px[k].iloc[-1]),weight=float(actual[k].iloc[-1]),target=float(reb[-1]['target'].get(k,0))) for k in px.columns if shares[k].iloc[-1]>1e-10]
+    pos.append(dict(ticker='Cash',quantity=None,price=None,value=float(cash.iloc[-1]),weight=float(actual['Cash'].iloc[-1]),target=.005))
+    return dict(generated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),dates=dates,tickers=list(actual.columns),weights=actual.round(7).values.tolist(),equity=equity.round(2).tolist(),benchmarks={k:(bench[k]/bench[k].iloc[0]*100000).round(2).tolist() for k in BENCH},positions=pos,orders=orders,rebalances=reb,last_rebalance=reb[-1]['date'],sessions_to_next=20-((len(px)-1)%20),as_of=dates[-1],equity_latest=float(equity.iloc[-1]),latest_scores={k:(round(float(v),4) if pd.notna(v) else None) for k,v in m.iloc[-1].items()},latest_signal_date=str((px.index[-1]-pd.Timedelta(days=1)).date()))
+
 def main():
     universe=json.loads((ROOT/'universe.json').read_text())
-    raw=download(list(dict.fromkeys(' '.join(universe.values()).split())))
+    cache=ROOT/'signal_prices.pkl'
+    raw=pd.read_pickle(cache) if cache.exists() else download(list(dict.fromkeys(' '.join(universe.values()).split())))
     raw=raw.reindex(pd.date_range(raw.index.min(),raw.index.max(),freq='D'))
     groups=[breadth(raw,s.split()) for s in universe.values()]
     def signal(k):
@@ -73,11 +96,17 @@ def main():
     # Fixed chronological split, exploratory only (no claim of true independent OOS).
     split=prices.index[int(len(prices)*.7)]
     rows=[]
+    rotation=None
     for strategy in STRATEGIES:
         for rb in [5,20,60]:
             w=targets(strategy,t,m,c,p,vol,rb)
             for cost in [.0005,.001,.002]:
-                v=portfolio(prices[PROXIES+[CASH]],w,cost)
+                if strategy=='momentum' and rb==20 and cost==.001:
+                    pf=portfolio(prices[PROXIES+[CASH]],w,cost,details=True)
+                    v=pf.value()
+                    rotation=rotation_details(pf,prices[PROXIES+[CASH]],w,m,prices)
+                else:
+                    v=portfolio(prices[PROXIES+[CASH]],w,cost)
                 rows.append(dict(strategy=strategy,rebalance=rb,cost=cost,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
     for b in BENCH:
         v=prices[b]/prices[b].iloc[0]*100000
@@ -91,6 +120,9 @@ def main():
         v=portfolio(prices[bench_cols],w,.001)
         rows.append(dict(strategy=label,rebalance=20,cost=.001,full=metrics(v),train=metrics(v.loc[v.index<split]),test=metrics(v.loc[split:])))
     result=dict(us_proxy=PROXIES[0],start=str(prices.index[0].date()),end=str(prices.index[-1].date()),split=str(split.date()),sessions=len(prices),rows=rows,limitations='Fixed universe; exploratory split; adjusted close execution; prior calendar day breadth; US sessions; equal member breadth; inverse yield/FX heuristic; no tax or extra slippage.')
+    if rotation is None:raise RuntimeError('Missing reference portfolio')
+    rotation.update(us_proxy=PROXIES[0],start=result['start'],end=result['end'],split=result['split'],metrics=next(x for x in rows if x['strategy']=='momentum' and x['rebalance']==20 and x['cost']==.001),results=rows)
+    (ROOT/'site'/('rotation_'+PROXIES[0]+'.json')).write_text(json.dumps(rotation,separators=(',',':'),allow_nan=False))
     out=ROOT/('research_results_'+PROXIES[0]+'.json');out.write_text(json.dumps(result,indent=2,allow_nan=False))
     print('RESEARCH_RESULT_'+PROXIES[0],json.dumps(result,separators=(',',':'),allow_nan=False))
 if __name__=='__main__':main()

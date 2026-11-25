@@ -2,3 +2,7 @@ __pycache__/
 .venv/
 site/breadth.json
 site/*.tmp
+
+signal_prices.pkl
+site/rotation_*.json
+research_results_*.json

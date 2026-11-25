@@ -26,9 +26,18 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt 'vectorbt>=0.28,<1' 'plotly==5.24.1'
       - run: python -m unittest -v
       - run: python refresh.py
+      - name: Generate SPY and QQQ rotation portfolios
+        run: |
+          US_PROXY=SPY python -m research.backtest
+          US_PROXY=QQQ python -m research.backtest
+      - name: Validate rotation data and frontend
+        run: |
+          python -m unittest -v
+          node --check site/rotation.js
+          python -c "import json; from pathlib import Path; [json.loads(Path('site/rotation_'+s+'.json').read_text()) for s in ['SPY','QQQ']]"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

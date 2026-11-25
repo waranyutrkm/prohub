@@ -42,5 +42,7 @@ def build(frame, universe):
 if __name__ == '__main__':
     universe = json.loads((ROOT/'universe.json').read_text())
     tickers = list(dict.fromkeys(' '.join(universe.values()).split()))
-    data = build(download(tickers),universe)
+    frame=download(tickers)
+    frame.to_pickle(ROOT/'signal_prices.pkl')
+    data = build(frame,universe)
     path=ROOT/'site'/'breadth.json'; tmp=path.with_suffix('.tmp'); tmp.write_text(json.dumps(data,separators=(',',':'),allow_nan=False)); tmp.replace(path)
